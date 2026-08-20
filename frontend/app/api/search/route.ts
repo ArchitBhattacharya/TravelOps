@@ -9,10 +9,11 @@
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { generateRoutes } from '@/services/routeEngine';
+import { isKnownPlace } from '@/services/hubData';
 import type { TravelCrisis, TravelRoute, RouteStatus, RiskLevel, TransportMode } from '@/types/travel';
 
 const execFileAsync = promisify(execFile);
@@ -83,6 +84,34 @@ async function runWebcmd(args: string[]): Promise<unknown> {
 async function webcmdAvailable(): Promise<boolean> {
   try { await runWebcmd(['--version']); return true; } catch { return false; }
 }
+async function runWebcmdWithStdin(args: string[], input: string, timeoutMs = 50_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const bin = process.env.WEBCMD_PATH ?? 'webcmd';
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (process.env.WEBCMD_WORKSPACE) env.WEBCMD_WORKSPACE = process.env.WEBCMD_WORKSPACE;
+
+    const child = spawn(bin, args, { env });
+    let stdout = '';
+    let stderr = '';
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error('webcmd command timed out'));
+    }, timeoutMs);
+
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new Error(stderr || `webcmd exited with code ${code}`));
+      else resolve(stdout);
+    });
+
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
 
 // ── Google Flights browser scrape ─────────────────────────────
 
@@ -112,13 +141,11 @@ async function scrapeGoogleFlights(
   try {
     const script = BROWSER_SCRIPT(origin, destination, departDate);
     // Write script via stdin
-    const bin = process.env.WEBCMD_PATH ?? 'webcmd';
-    const env: NodeJS.ProcessEnv = { ...process.env };
-
-    const { stdout } = await execFileAsync(
-      bin,
+    // NEW:
+    const stdout = await runWebcmdWithStdin(
       ['--session', sid, 'browser', 'run', '--stdin', '--timeout', '40'],
-      { timeout: 50_000, env, input: script }
+      script,
+      50_000
     );
 
     const parsed = JSON.parse(stdout.trim()) as { result?: { snapshot?: string[] } };
@@ -242,7 +269,17 @@ export async function POST(req: NextRequest) {
     let hubs: { origin: TransportHub; destination: TransportHub } | null = null;
     if (hasGemini) {
       try { hubs = await resolveHubs(crisis.origin, crisis.destination); }
+      // After: hubs = await resolveHubs(crisis.origin, crisis.destination);
+
       catch (e) { console.warn('[TravelOps] Hub resolution failed:', (e as Error).message); }
+    }
+    if (hubs && (!isKnownPlace(crisis.origin) || !isKnownPlace(crisis.destination))) {
+      console.warn('[TravelOps] Gemini-resolved hub for an unverified place — treating as unresolved.');
+      hubs = null;
+    }
+    if (hubs && (!isKnownPlace(crisis.origin) || !isKnownPlace(crisis.destination))) {
+      console.warn('[TravelOps] Gemini-resolved hub for an unverified place — treating as unresolved.');
+      hubs = null;
     }
 
     // Step 2: webcmd → Google Flights → Gemini parse
