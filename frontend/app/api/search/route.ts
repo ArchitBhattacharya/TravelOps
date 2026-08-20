@@ -14,6 +14,7 @@ import { promisify } from 'util';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { generateRoutes } from '@/services/routeEngine';
 import { isKnownPlace } from '@/services/hubData';
+import { searchRailKitRoutes } from '@/services/railKitService';
 import type { TravelCrisis, TravelRoute, RouteStatus, RiskLevel, TransportMode } from '@/types/travel';
 
 const execFileAsync = promisify(execFile);
@@ -203,7 +204,13 @@ Extract every distinct flight from the snippets. For each, return a JSON array e
     ${!hubs.destination.hasDirectAirport ? `{"mode":"cab","from":"hub airport","to":"${crisis.destination}","departure":"estimated","arrival":"estimated","duration":"~${Math.ceil((hubs.destination.nearestAirport?.distanceKm ?? 100) / 40)}h","carrier":"Cab/Train"}` : ''}
   ],
   "rejectionReason": "..." or null,
-  "recommendationReasons": ["..."] or null
+  "recommendationReasons": ["..."] or null,
+  "serviceName": "exact service/flight number when present in the raw text" or null,
+  "vehicleType": "exact aircraft/vehicle type when present in the raw text" or null,
+  "category": "exact fare or vehicle category when present in the raw text" or null,
+  "amenities": ["only amenities explicitly present in raw text"] or [],
+  "boardingPoints": ["only points explicitly present in raw text"] or [],
+  "droppingPoints": ["only points explicitly present in raw text"] or []
 }
 
 Rules:
@@ -211,6 +218,7 @@ Rules:
 - viable: meets deadline AND within budget AND score<75
 - rejected: misses deadline OR over budget
 - Score higher options that suit "${crisis.priority}" priority
+- Do not infer vehicle types, amenities, boarding points, operator details, or provider URLs. Omit a field when it is not in the raw text.
 - Return ONLY the JSON array, no markdown.
 `;
 
@@ -220,6 +228,8 @@ Rules:
     deadlineMet?: boolean; overBudget?: boolean; riskLevel?: string; score?: number;
     status?: string; safetyBuffer?: string; rejectionReason?: string | null;
     recommendationReasons?: string[] | null;
+    serviceName?: string | null; vehicleType?: string | null; category?: string | null;
+    amenities?: string[] | null; boardingPoints?: string[] | null; droppingPoints?: string[] | null;
     segments?: Array<{ mode: string; from: string; to: string; departure: string; arrival: string; carrier?: string; duration: string; transferTime?: string }>;
   }>>(prompt);
 
@@ -250,8 +260,27 @@ Rules:
       deadlineMet: r.deadlineMet ?? false,
       recommendationReasons: r.recommendationReasons ?? undefined,
       rejectionReason: r.rejectionReason ?? undefined,
+      operatorName: r.carrier ?? undefined,
+      serviceName: r.serviceName ?? undefined,
+      vehicleType: r.vehicleType ?? undefined,
+      category: r.category ?? undefined,
+      amenities: r.amenities?.filter(Boolean),
+      boardingPoints: r.boardingPoints?.filter(Boolean),
+      droppingPoints: r.droppingPoints?.filter(Boolean),
+      stops: r.stops ?? undefined,
+      withinBudget: !(r.overBudget ?? (r.price ?? 0) > crisis.maxBudget),
+      researchSource: 'Google Flights',
     } satisfies TravelRoute;
   });
+}
+
+function searchStats(routes: TravelRoute[], totalFound = routes.length) {
+  return {
+    totalFound,
+    eliminated: routes.filter((route) => route.status === 'rejected').length,
+    viable: routes.filter((route) => route.status === 'viable').length,
+    recommended: routes.filter((route) => route.status === 'recommended').length,
+  };
 }
 
 // ── POST handler ──────────────────────────────────────────────
@@ -277,6 +306,13 @@ export async function POST(req: NextRequest) {
       console.warn('[TravelOps] Gemini-resolved hub for an unverified place — treating as unresolved.');
       hubs = null;
     }
+
+    // RailKit is intentionally optional: no key or an unsupported station pair
+    // leaves the existing flight/WebCMD search path unchanged.
+    const railKitRoutes = await searchRailKitRoutes(crisis).catch((error) => {
+      console.warn('[TravelOps] RailKit search failed:', (error as Error).message);
+      return [] as TravelRoute[];
+    });
     if (hubs && (!isKnownPlace(crisis.origin) || !isKnownPlace(crisis.destination))) {
       console.warn('[TravelOps] Gemini-resolved hub for an unverified place — treating as unresolved.');
       hubs = null;
@@ -296,12 +332,10 @@ export async function POST(req: NextRequest) {
           if (routes.length > 0) {
             const order = { recommended: 0, viable: 1, rejected: 2 };
             routes.sort((a, b) => order[a.status] - order[b.status] || b.score - a.score);
+            const combinedRoutes = [...routes, ...railKitRoutes];
             return NextResponse.json({
-              routes, source: 'webcmd+gemini', hubs,
-              totalFound: snapshot.length,
-              eliminated: routes.filter(r => r.status === 'rejected').length,
-              viable:     routes.filter(r => r.status === 'viable').length,
-              recommended:routes.filter(r => r.status === 'recommended').length,
+              routes: combinedRoutes, source: 'webcmd+gemini', hubs,
+              ...searchStats(combinedRoutes, snapshot.length + railKitRoutes.length),
             });
           }
         }
@@ -321,12 +355,10 @@ export async function POST(req: NextRequest) {
         if (routes.length > 0) {
           const order = { recommended: 0, viable: 1, rejected: 2 };
           routes.sort((a, b) => order[a.status] - order[b.status] || b.score - a.score);
+          const combinedRoutes = [...routes, ...railKitRoutes];
           return NextResponse.json({
-            routes, source: 'gemini', hubs,
-            totalFound: routes.length + 3,
-            eliminated: routes.filter(r => r.status === 'rejected').length,
-            viable:     routes.filter(r => r.status === 'viable').length,
-            recommended:routes.filter(r => r.status === 'recommended').length,
+            routes: combinedRoutes, source: 'gemini', hubs,
+            ...searchStats(combinedRoutes, routes.length + railKitRoutes.length + 3),
           });
         }
       } catch (e) {
@@ -336,7 +368,11 @@ export async function POST(req: NextRequest) {
 
     // Step 4: pure dynamic fallback
     const result = generateRoutes(crisis);
-    return NextResponse.json({ ...result, source: 'demo', hubs });
+    const generatedRoutes = railKitRoutes.length > 0
+      ? result.routes.filter((route) => route.primaryMode !== 'train')
+      : result.routes;
+    const routes = [...generatedRoutes, ...railKitRoutes];
+    return NextResponse.json({ ...result, routes, ...searchStats(routes, result.totalFound + railKitRoutes.length), source: 'demo', hubs });
 
   } catch (err) {
     console.error('[TravelOps] /api/search error:', err);

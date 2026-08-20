@@ -72,6 +72,17 @@ export interface RouteSegment {
   transferTime?: string;
 }
 
+/** A provider which returned this exact route. Booking links are optional because
+ * the research provider does not always expose a direct checkout URL. */
+export interface BookingSource {
+  name: string;
+  logo?: string;
+  rating?: number;
+  price?: number;
+  bookingUrl?: string;
+  timestamp?: string;
+}
+
 export interface TravelRoute {
   id: string;
   status: RouteStatus;
@@ -88,6 +99,21 @@ export interface TravelRoute {
   rejectionReason?: string;
   recommendationReasons?: string[];
   primaryMode: TransportMode;
+  // Optional enrichment supplied by a transport search/normalization provider.
+  // Keep these optional so existing route engines and older backend responses work.
+  operatorName?: string;
+  serviceName?: string;
+  vehicleType?: string;
+  category?: string;
+  amenities?: string[];
+  boardingPoints?: string[];
+  droppingPoints?: string[];
+  stops?: number;
+  sources?: BookingSource[];
+  researchSource?: string;
+  withinBudget?: boolean;
+  /** False when a provider returned an option but no verified fare. */
+  priceAvailable?: boolean;
 }
 
 export interface AgentActivity {
