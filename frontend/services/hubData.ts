@@ -69,6 +69,12 @@ const HUBS: Record<string, HubInfo> = {
         railStation: { name: 'Durgapur Railway Station', code: 'DGR' },
         busStand: { name: 'Durgapur Bus Stand (City Centre)' },
     },
+    asansol: {
+        city: 'Asansol',
+        airport: null,
+        railStation: { name: 'Asansol Junction', code: 'ASN' },
+        busStand: { name: 'Asansol Bus Stand' },
+    },
     varanasi: {
         city: 'Varanasi',
         airport: { name: 'Lal Bahadur Shastri International Airport', iata: 'VNS' },

@@ -3,13 +3,14 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  Plane, TrainFront, Bus, GitFork, AlertCircle, Clock,
+  Plane, TrainFront, GitFork, AlertCircle, Clock,
   MapPin, CalendarClock, Wallet, Target, Sliders, Users, ArrowRight, Zap,
-  CheckCircle, XCircle, RefreshCw, ChevronRight
+  RefreshCw, ChevronRight
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { TravelResultCard } from '@/components/crisis/TravelResultCard';
 import { useCrisis } from '@/store/crisisStore';
 import { DEMO_CRISIS } from '@/lib/demoMode';
 import { agentService, getSessionHubs } from '@/services/agentService';
@@ -51,78 +52,6 @@ function ActivityIcon({ type }: { type: AgentActivity['type'] }) {
   }
 }
 
-// ── Route card ────────────────────────────────────────────────
-function RouteCard({ route, onSelect }: { route: TravelRoute; onSelect?: () => void }) {
-  const statusColors = {
-    recommended: 'border-cyan-500/40 bg-cyan-500/5',
-    viable:      'border-slate-500/40 bg-slate-800/30',
-    rejected:    'border-red-500/20 bg-red-900/10 opacity-70',
-  };
-  const riskColors = { LOW: 'success', MEDIUM: 'warning', HIGH: 'crisis' } as const;
-
-  return (
-    <Card className={`${statusColors[route.status]} border`} padding="md">
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-2">
-          {route.status === 'recommended' && (
-            <Badge variant="info" dot>TOP PICK</Badge>
-          )}
-          {route.status === 'rejected' && (
-            <Badge variant="rejected">REJECTED</Badge>
-          )}
-          {route.status === 'viable' && (
-            <Badge variant="neutral">VIABLE</Badge>
-          )}
-          <Badge variant={riskColors[route.riskLevel]}>{route.riskLevel} RISK</Badge>
-        </div>
-        <div className="text-right">
-          <p className="text-cyan-400 font-bold text-lg">{route.currency}{route.totalPrice.toLocaleString()}</p>
-          <p className="text-xs text-slate-400">Score: {route.score}/100</p>
-        </div>
-      </div>
-
-      {/* Segments */}
-      <div className="space-y-2 mb-3">
-        {route.segments.map((seg, i) => (
-          <div key={i} className="flex items-center gap-2 text-sm">
-            <span className="text-slate-400 capitalize w-12 text-xs">{seg.mode}</span>
-            <span className="text-white font-medium">{seg.from}</span>
-            <ArrowRight size={12} className="text-slate-500 flex-shrink-0" />
-            <span className="text-white font-medium">{seg.to}</span>
-            <span className="text-slate-400 text-xs ml-auto">{seg.departure} → {seg.arrival}</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex items-center gap-4 text-xs text-slate-400 mb-3">
-        <span>⏱ {route.travelTime}</span>
-        <span>✈ {route.transfers === 0 ? 'Direct' : `${route.transfers} stop`}</span>
-        <span>Buffer: {route.safetyBuffer}</span>
-        {route.deadlineMet
-          ? <span className="text-green-400">✓ Meets deadline</span>
-          : <span className="text-red-400">✗ Misses deadline</span>
-        }
-      </div>
-
-      {route.rejectionReason && (
-        <p className="text-xs text-red-400 mb-3">✗ {route.rejectionReason}</p>
-      )}
-
-      {route.recommendationReasons && route.recommendationReasons.length > 0 && (
-        <ul className="text-xs text-green-400 mb-3 space-y-0.5">
-          {route.recommendationReasons.map((r, i) => <li key={i}>✓ {r}</li>)}
-        </ul>
-      )}
-
-      {route.status !== 'rejected' && onSelect && (
-        <Button variant="primary" size="sm" className="w-full" onClick={onSelect} icon={<CheckCircle size={14} />}>
-          Select This Route
-        </Button>
-      )}
-    </Card>
-  );
-}
-
 // ── Main component ────────────────────────────────────────────
 export function CrisisForm() {
   const router = useRouter();
@@ -153,6 +82,13 @@ export function CrisisForm() {
   const [agentStatus, setAgentStatus] = useState('');
   const [hubs, setHubs] = useState<SearchResult['hubs'] | null>(null);
   const [dataSource, setDataSource] = useState<SearchResult['source'] | null>(null);
+  const [sortBy, setSortBy] = useState<'recommended' | 'cheapest' | 'fastest' | 'risk'>('recommended');
+  const [busTypeFilter, setBusTypeFilter] = useState('all');
+  const [operatorFilter, setOperatorFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
+  const [withinBudgetOnly, setWithinBudgetOnly] = useState(false);
+  const [deadlineOnly, setDeadlineOnly] = useState(false);
+  const [directOnly, setDirectOnly] = useState(false);
 
   // Pre-fill from demo mode
   useEffect(() => {
@@ -227,9 +163,26 @@ export function CrisisForm() {
     const resolvedHubs = getSessionHubs(newSession.id);
     if (resolvedHubs) setHubs(resolvedHubs);
     // source is stored in the fetch result — read from crisisState session
-    const src = (crisisState.session as unknown as { source?: SearchResult['source'] })?.source;
+    const src = (newSession as unknown as { source?: SearchResult['source'] }).source;
     if (src) setDataSource(src);
   };
+
+  const filteredRoutes = session ? [...session.routes]
+    .filter((route) => busTypeFilter === 'all' || route.category === busTypeFilter || route.vehicleType === busTypeFilter)
+    .filter((route) => operatorFilter === 'all' || (route.operatorName ?? route.segments[0]?.carrier) === operatorFilter)
+    .filter((route) => sourceFilter === 'all' || route.sources?.some((source) => source.name === sourceFilter))
+    .filter((route) => !withinBudgetOnly || ((route.priceAvailable ?? true) && (route.withinBudget ?? route.totalPrice <= (crisisState.currentCrisis?.maxBudget ?? Number(budget)))))
+    .filter((route) => !deadlineOnly || route.deadlineMet)
+    .filter((route) => !directOnly || route.transfers === 0)
+    .sort((a, b) => {
+      if (sortBy === 'cheapest') return a.totalPrice - b.totalPrice;
+      if (sortBy === 'fastest') return a.travelTime.localeCompare(b.travelTime, undefined, { numeric: true });
+      if (sortBy === 'risk') return ({ LOW: 0, MEDIUM: 1, HIGH: 2 }[a.riskLevel] - { LOW: 0, MEDIUM: 1, HIGH: 2 }[b.riskLevel]);
+      return b.score - a.score;
+    }) : [];
+  const operators = session ? [...new Set(session.routes.map((route) => route.operatorName ?? route.segments[0]?.carrier).filter((value): value is string => Boolean(value)))] : [];
+  const sources = session ? [...new Set(session.routes.flatMap((route) => route.sources?.map((source) => source.name) ?? []))] : [];
+  const busTypes = session ? [...new Set(session.routes.flatMap((route) => [route.category, route.vehicleType]).filter((value): value is string => Boolean(value)))] : [];
 
   const steps: Step[] = ['type', 'details', 'preferences'];
   const stepLabels = ['Crisis Type', 'Trip Details', 'Preferences'];
@@ -582,14 +535,46 @@ export function CrisisForm() {
             ))}
           </div>
 
+          {session.routes[0]?.segments[0] && (() => {
+            const first = session.routes[0].segments[0];
+            const last = session.routes[0].segments[session.routes[0].segments.length - 1];
+            return <Card padding="sm" className="border border-slate-700/70">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Search summary</p>
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                <span className="font-medium text-white">{first.from}</span><ArrowRight size={14} className="text-cyan-500" /><span className="font-medium text-white">{last.to}</span>
+                <span className="text-slate-400">{first.departure} → {last.arrival} · {session.routes[0].travelTime} · {session.routes[0].transfers === 0 ? 'Direct' : `${session.routes[0].transfers} transfers`}</span>
+                <span className={session.routes[0].deadlineMet ? 'text-green-400' : 'text-red-400'}>{session.routes[0].deadlineMet ? '✓ Meets deadline' : '✕ Misses deadline'}</span>
+              </div>
+            </Card>;
+          })()}
+
+          <Card padding="sm" className="border border-slate-700/70">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-xs font-semibold text-slate-400">Sort by</label>
+              <select value={sortBy} onChange={(event) => setSortBy(event.target.value as typeof sortBy)} className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"><option value="recommended">Recommended</option><option value="cheapest">Cheapest</option><option value="fastest">Fastest</option><option value="risk">Lowest Risk</option></select>
+              <label className="text-xs font-semibold text-slate-400">Bus type</label>
+              <select value={busTypeFilter} onChange={(event) => setBusTypeFilter(event.target.value)} className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"><option value="all">All</option>{busTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select>
+              <label className="text-xs font-semibold text-slate-400">Operator</label>
+              <select value={operatorFilter} onChange={(event) => setOperatorFilter(event.target.value)} className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"><option value="all">All operators</option>{operators.map((operator) => <option key={operator} value={operator}>{operator}</option>)}</select>
+              <label className="text-xs font-semibold text-slate-400">Source</label>
+              <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"><option value="all">All sources</option>{sources.map((source) => <option key={source} value={source}>{source}</option>)}</select>
+              <label className="ml-1 inline-flex items-center gap-1.5 text-xs text-slate-300"><input type="checkbox" checked={withinBudgetOnly} onChange={(event) => setWithinBudgetOnly(event.target.checked)} /> Within budget</label>
+              <label className="inline-flex items-center gap-1.5 text-xs text-slate-300"><input type="checkbox" checked={deadlineOnly} onChange={(event) => setDeadlineOnly(event.target.checked)} /> Meets deadline</label>
+              <label className="inline-flex items-center gap-1.5 text-xs text-slate-300"><input type="checkbox" checked={directOnly} onChange={(event) => setDirectOnly(event.target.checked)} /> Direct only</label>
+            </div>
+          </Card>
+
           {/* Routes */}
-          {session.routes.map((route) => (
-            <RouteCard
+          {filteredRoutes.map((route) => (
+            <TravelResultCard
               key={route.id}
               route={route}
+              maxBudget={crisisState.currentCrisis?.maxBudget ?? Number(budget)}
+              researchPowered={dataSource === 'webcmd+gemini'}
               onSelect={() => alert(`Route ${route.id} selected! (booking flow coming soon)`)}
             />
           ))}
+          {filteredRoutes.length === 0 && <Card padding="md" className="text-center text-sm text-slate-500">No routes match these filters.</Card>}
         </div>
       )}
     </div>
